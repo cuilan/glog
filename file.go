@@ -30,6 +30,18 @@ type FileLogger struct {
 	fileObj *os.File
 	// 错误日志文件对象
 	errFileObj *os.File
+	// 日志通道
+	logChan chan *logMsg
+}
+
+// logMsg 日志消息结构体
+type logMsg struct {
+	Level     LogLevel
+	msg       string
+	fileName  string
+	funcName  string
+	timestamp string
+	line      int
 }
 
 // NewFileLogger 构造函数
@@ -43,6 +55,7 @@ func NewFileLogger(levelStr, fp, fn string, maxSize int64) *FileLogger {
 		filePath:    fp,
 		fileName:    fn,
 		maxFileSize: maxSize,
+		logChan:     make(chan *logMsg, 50000),
 	}
 	err = file.initFile()
 	if err != nil {
@@ -64,6 +77,9 @@ func (f *FileLogger) initFile() error {
 		return err
 	}
 	f.fileObj = fileObj
+
+	// 开启一个goroutine写日志，开启多个会出现并发问题
+	go f.writeLogBackground()
 	return nil
 }
 
@@ -76,7 +92,103 @@ func (f *FileLogger) initErrFile() error {
 		return err
 	}
 	f.errFileObj = errFileObj
+
+	// 开启一个goroutine写日志，开启多个会出现并发问题
+	go f.writeLogBackground()
 	return nil
+}
+
+// Trace trace level
+func (f *FileLogger) Trace(format string, a ...interface{}) {
+	f.log(Trace, format, a...)
+}
+
+// Debug debug level
+func (f *FileLogger) Debug(format string, a ...interface{}) {
+	f.log(Debug, format, a...)
+}
+
+// Info info level
+func (f *FileLogger) Info(format string, a ...interface{}) {
+	f.log(Info, format, a...)
+}
+
+// Warn info level
+func (f *FileLogger) Warn(format string, a ...interface{}) {
+	f.log(Warn, format, a...)
+}
+
+// Error info level
+func (f *FileLogger) Error(format string, a ...interface{}) {
+	f.log(Error, format, a...)
+}
+
+// log 文件记录日志的核心方法
+func (f *FileLogger) log(level LogLevel, format string, a ...interface{}) {
+	if !f.enable(level) {
+		return
+	}
+	msg := fmt.Sprintf(format, a...)
+	now := time.Now()
+	funcName, fileName, lineNo := getInfo(3)
+
+	// 将日志发送到通道中
+	logMsgPoint := &logMsg{
+		Level:     level,
+		msg:       msg,
+		fileName:  fileName,
+		funcName:  funcName,
+		timestamp: now.Format("2006-01-02 15:04:05"),
+		line:      lineNo,
+	}
+
+	// 为防止通道中被写满，造成阻塞，使用select多路复用
+	select {
+	case f.logChan <- logMsgPoint:
+	default:
+		// 默认不处理，保证主业务正常处理
+	}
+
+}
+
+// writeLogBackground 线程在后台写日志
+func (f *FileLogger) writeLogBackground() {
+	for {
+		select {
+		// 从通道中取值
+		case logMsgPoint := <-f.logChan:
+			level := logMsgPoint.Level
+
+			// 格式化日志级别字符对齐：[DEBUG] [ INFO]
+			levelStr, _ := parseLogLevel2String(level)
+			formatLen := 5 - len(levelStr)
+			for i := 0; i < formatLen; i++ {
+				levelStr = " " + levelStr
+			}
+
+			// 格式化写入日志格式
+			logStringFormat := fmt.Sprintf("[%s] [%s] [%s:%s:%d] - %s\n",
+				logMsgPoint.timestamp, levelStr, logMsgPoint.fileName,
+				logMsgPoint.funcName, logMsgPoint.line, logMsgPoint.msg)
+
+			if level >= Error {
+				// 写入错误日志
+				if f.needCut(f.errFileObj) {
+					f.splitFile(f.errFileObj, level)
+				}
+				fmt.Fprintf(f.errFileObj, logStringFormat)
+			} else {
+				// 写入日志
+				if f.needCut(f.fileObj) {
+					f.splitFile(f.fileObj, level)
+				}
+				fmt.Fprintf(f.fileObj, logStringFormat)
+			}
+		default:
+			// 通道中取不到值，先睡眠500毫秒
+			time.Sleep(time.Millisecond * 500)
+		}
+	}
 }
 
 // enable 是否开启该级别日志
@@ -117,56 +229,5 @@ func (f *FileLogger) splitFile(file *os.File, level LogLevel) {
 		if err != nil {
 			panic(err)
 		}
-	}
-}
-
-// Trace trace level
-func (f *FileLogger) Trace(format string, a ...interface{}) {
-	f.log(Trace, format, a...)
-}
-
-// Debug debug level
-func (f *FileLogger) Debug(format string, a ...interface{}) {
-	f.log(Debug, format, a...)
-}
-
-// Info info level
-func (f *FileLogger) Info(format string, a ...interface{}) {
-	f.log(Info, format, a...)
-}
-
-// Warn info level
-func (f *FileLogger) Warn(format string, a ...interface{}) {
-	f.log(Warn, format, a...)
-}
-
-// Error info level
-func (f *FileLogger) Error(format string, a ...interface{}) {
-	f.log(Error, format, a...)
-}
-
-// log 文件记录日志的核心方法
-func (f *FileLogger) log(level LogLevel, format string, a ...interface{}) {
-	if !f.enable(level) {
-		return
-	}
-	msg := fmt.Sprintf(format, a...)
-	now := time.Now()
-	levelStr, _ := parseLogLevel2String(level)
-	formatLen := 5 - len(levelStr)
-	for i := 0; i < formatLen; i++ {
-		levelStr = " " + levelStr
-	}
-	funcName, fileName, lineNo := getInfo(3)
-	if level >= Error {
-		if f.needCut(f.errFileObj) {
-			f.splitFile(f.errFileObj, level)
-		}
-		fmt.Fprintf(f.errFileObj, "[%s] [%s] [%s:%s:%d] - %s\n", now.Format("2006-01-02 15:04:05"), levelStr, fileName, funcName, lineNo, msg)
-	} else {
-		if f.needCut(f.fileObj) {
-			f.splitFile(f.fileObj, level)
-		}
-		fmt.Fprintf(f.fileObj, "[%s] [%s] [%s:%s:%d] - %s\n", now.Format("2006-01-02 15:04:05"), levelStr, fileName, funcName, lineNo, msg)
 	}
 }

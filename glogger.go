@@ -24,7 +24,13 @@ const (
 )
 
 // Logger 接口
-type Logger interface{}
+type Logger interface {
+	Trace(format string, a ...interface{})
+	Debug(format string, a ...interface{})
+	Info(format string, a ...interface{})
+	Warn(format string, a ...interface{})
+	Error(format string, a ...interface{})
+}
 
 // LogLevel 日志级别
 type LogLevel uint16
